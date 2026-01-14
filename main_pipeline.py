@@ -80,20 +80,57 @@ def fetch_dog_breeds(api_key=None):
 
 def fetch_extra_breed_data():
     """
-    Fetches supplementary cat breed data from a local CSV.
+    Fetches cat breed data from BOTH TheCatAPI and a local CSV.
+    Merges them to create a comprehensive list.
     """
-    print("Fetching Supplementary Cat Breed data...")
+    cat_dfs = []
+
+    # 1. Fetch from API
+    print("Fetching Cat Breeds from TheCatAPI...")
+    try:
+        url = "https://api.thecatapi.com/v1/breeds"
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            df_api = pd.DataFrame(data)
+            if not df_api.empty and 'name' in df_api.columns:
+                # Rename 'name' to 'Breed' to match CSV
+                df_api = df_api.rename(columns={'name': 'Breed', 'origin': 'Origin'})
+                # Select only relevant columns (Breed is key)
+                # We keep other cols if needed, but for now just normalization
+                cat_dfs.append(df_api[['Breed', 'Origin']])
+                print(f" - Fetched {len(df_api)} breeds from API.")
+    except Exception as e:
+        print(f" - Warning: API fetch failed ({e})")
+
+    # 2. Fetch from CSV
+    print("Loading Cat Breeds from Local CSV...")
     csv_path = os.path.join(RAW_DIR, 'cat_breeds.csv')
     if os.path.exists(csv_path):
         try:
-            df = pd.read_csv(csv_path)
-            print(f"Successfully loaded {len(df)} cat breeds.")
-            return df
+            df_csv = pd.read_csv(csv_path)
+            # Ensure it has 'Breed' column
+            if 'Breed' in df_csv.columns:
+                cat_dfs.append(df_csv)
+                print(f" - Loaded {len(df_csv)} breeds from CSV.")
         except Exception as e:
-            print(f"Error reading cat breeds CSV: {e}")
-            return pd.DataFrame()
+            print(f" - Warning: CSV load failed ({e})")
     else:
         print("Cat breeds CSV not found.")
+
+    # 3. Merge
+    if cat_dfs:
+        df_final = pd.concat(cat_dfs, ignore_index=True)
+        # Normalize Breed name for deduplication
+        df_final['Breed_Norm'] = df_final['Breed'].astype(str).str.strip().str.lower()
+        
+        before = len(df_final)
+        df_final = df_final.drop_duplicates(subset=['Breed_Norm'])
+        df_final = df_final.drop(columns=['Breed_Norm'])
+        
+        print(f"Merged Cat Data: {len(df_final)} unique breeds (from {before} total records).")
+        return df_final
+    else:
         return pd.DataFrame()
 
 # ==========================================
