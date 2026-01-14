@@ -1,6 +1,13 @@
 __pycache__/
 *.pyc
 .DS_Store
-data/raw/
-data/processed/
+# Ignore data directories except for specific files
+data/*
 .vscode/
+/powerbi_data
+
+# Exclude all files in data/raw/ except for dog_breeds.json and cat_breeds.csv
+!data/raw/
+data/raw/*
+!data/raw/dog_breeds.json
+!data/raw/cat_breeds.csv
