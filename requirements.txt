@@ -2,3 +2,6 @@ pandas
 requests
 matplotlib
 seaborn
+
+streamlit
+wordcloud

@@ -78,6 +78,24 @@ def fetch_dog_breeds(api_key=None):
         print(f"Error fetching dog breeds: {e}")
         return []
 
+def fetch_extra_breed_data():
+    """
+    Fetches supplementary cat breed data from a local CSV.
+    """
+    print("Fetching Supplementary Cat Breed data...")
+    csv_path = os.path.join(RAW_DIR, 'cat_breeds.csv')
+    if os.path.exists(csv_path):
+        try:
+            df = pd.read_csv(csv_path)
+            print(f"Successfully loaded {len(df)} cat breeds.")
+            return df
+        except Exception as e:
+            print(f"Error reading cat breeds CSV: {e}")
+            return pd.DataFrame()
+    else:
+        print("Cat breeds CSV not found.")
+        return pd.DataFrame()
+
 # ==========================================
 # Transformation & Cleaning
 # ==========================================
@@ -171,8 +189,9 @@ def enrich_data(df, dog_breeds_data):
     Enriches FDA data with Dog Breed Group information.
     """
     df_dog_lookup = pd.DataFrame(dog_breeds_data)
-    if not df_dog_lookup.empty:
-        df_dog_lookup = df_dog_lookup[['name', 'breed_group', 'bred_for']].copy()
+    required_cols = ['name', 'breed_group', 'bred_for']
+    if not df_dog_lookup.empty and all(col in df_dog_lookup.columns for col in required_cols):
+        df_dog_lookup = df_dog_lookup[required_cols].copy()
         df_dog_lookup['name'] = df_dog_lookup['name'].str.lower()
         valid_dog_breeds = df_dog_lookup['name'].unique().tolist()
         
@@ -360,6 +379,36 @@ def get_or_create_key(cursor, table, search_cols, values, key_col):
         insert_sql = f"INSERT INTO {table} ({cols}) VALUES ({placeholders})"
         cursor.execute(insert_sql, values)
         return cursor.lastrowid
+
+def load_cat_breeds_to_dim(conn, df_cats):
+    """
+    Loads supplementary cat breeds into DimAnimal.
+    """
+    if df_cats.empty:
+        return
+
+    print("Loading Supplementary Cat Breeds into DimAnimal...")
+    cursor = conn.cursor()
+    
+    count = 0
+    for _, row in df_cats.iterrows():
+        breed = row.get('Breed', 'Unknown')
+        # Insert a generic record for this breed if it doesn't exist
+        # We assume unknown gender/status for these taxonomy entries
+        cursor.execute("""
+            SELECT AnimalKey FROM DimAnimal 
+            WHERE Species='Cat' AND Breed=?
+        """, (breed,))
+        
+        if not cursor.fetchone():
+            cursor.execute("""
+                INSERT INTO DimAnimal (Species, Breed, Gender, ReproductiveStatus, BreedGroup, BreedPurpose)
+                VALUES ('Cat', ?, 'Unknown', 'Unknown', 'Domestic', 'Companion')
+            """, (breed,))
+            count += 1
+            
+    conn.commit()
+    print(f"Added {count} new cat breeds to DimAnimal.")
 
 def load_data_to_warehouse(conn, df_enriched):
     """
@@ -552,6 +601,102 @@ def run_text_analytics(conn):
             print(f"Word Cloud Error: {e}")
 
 # ==========================================
+# Information Visualization & Data Analytics
+# ==========================================
+def generate_business_reports_and_dashboard(conn):
+    """
+    Generates Business Reports and Dashboard Visualizations.
+    
+    a. Business Reports:
+       1. Executive Report: High-level overview for stakeholders (Total events, Trend).
+       2. Operational Report: Detailed breakdown for veterinarians (Outcomes by Breed).
+       
+    b. Dashboard Design:
+       Functionality: Visualizes key performance indicators (KPIs) regarding animal safety.
+       Purpose: Assist in identifying patterns in adverse drug reactions.
+    """
+    print("\n=== Phase 5: Generating Analytics & Visualizations ===")
+    cursor = conn.cursor()
+    
+    # --- Part A: Business Reports ---
+    
+    # 1. Executive Summary: Monthly Event Trend
+    # Usage: Strategic planning and resource allocation.
+    print("\n[Report 1] Executive Trend Analysis (Events by Month):")
+    df_trend = pd.read_sql_query("""
+        SELECT 
+            t.Year, t.Month, COUNT(f.EventID) as TotalEvents
+        FROM FactAdverseEvents f
+        JOIN DimTime t ON f.TimeKey = t.TimeKey
+        GROUP BY t.Year, t.Month
+        ORDER BY t.Year DESC, t.Month DESC
+        LIMIT 6
+    """, conn)
+    print(df_trend)
+
+    # 2. Operational Report: Critical Outcomes by Drug
+    # Usage: Drug safety monitoring for veterinary professionals.
+    print("\n[Report 2] Most Critical Drugs (Top 5 by 'Death' Outcome):")
+    df_critical = pd.read_sql_query("""
+        SELECT 
+            d.BrandName, COUNT(f.EventID) as DeathCount
+        FROM FactAdverseEvents f
+        JOIN DimDrug d ON f.DrugKey = d.DrugKey
+        JOIN DimOutcome o ON f.OutcomeKey = o.OutcomeKey
+        WHERE o.OutcomeName IN ('Died', 'Euthanized')
+        GROUP BY d.BrandName
+        ORDER BY DeathCount DESC
+        LIMIT 5
+    """, conn)
+    print(df_critical)
+
+    # --- Part B: Dashboard Visualizations ---
+    print("\nGenerating Dashboard Widgets (Saved to 'data/processed')...")
+
+    # Widget 1: Severity Distribution (Pie Chart)
+    # Purpose: Quick assessment of event severity ratios.
+    df_outcome = pd.read_sql_query("""
+        SELECT SeverityLevel, COUNT(EventID) as Count
+        FROM FactAdverseEvents f
+        JOIN DimOutcome o ON f.OutcomeKey = o.OutcomeKey
+        GROUP BY SeverityLevel
+    """, conn)
+    
+    if not df_outcome.empty:
+        plt.figure(figsize=(8, 6))
+        colors = ['#ff9999', '#66b3ff']  # Light red (Critical), Light blue (Normal)
+        plt.pie(df_outcome['Count'], labels=df_outcome['SeverityLevel'], autopct='%1.1f%%', startangle=90, colors=colors)
+        plt.title('Dashboard: Adverse Event Severity Distribution')
+        output_path = os.path.join(PROCESSED_DIR, 'dashboard_severity_pie.png')
+        plt.savefig(output_path)
+        print(f" - Saved Severity Chart: {output_path}")
+        plt.close()
+
+    # Widget 2: Top 10 Reactions (Bar Chart)
+    # Purpose: Identify most common clinical symptoms.
+    df_reactions = pd.read_sql_query("""
+        SELECT r.ReactionName, COUNT(f.EventID) as Count
+        FROM FactAdverseEvents f
+        JOIN DimReaction r ON f.ReactionKey = r.ReactionKey
+        WHERE r.ReactionName != 'Unknown'
+        GROUP BY r.ReactionName
+        ORDER BY Count DESC
+        LIMIT 10
+    """, conn)
+
+    if not df_reactions.empty:
+        plt.figure(figsize=(10, 6))
+        plt.barh(df_reactions['ReactionName'], df_reactions['Count'], color='green')
+        plt.xlabel('Number of Reports')
+        plt.title('Dashboard: Top 10 Adverse Reactions')
+        plt.gca().invert_yaxis()  # Highest on top
+        plt.tight_layout()
+        output_path = os.path.join(PROCESSED_DIR, 'dashboard_top_reactions.png')
+        plt.savefig(output_path)
+        print(f" - Saved Reactions Chart: {output_path}")
+        plt.close()
+
+# ==========================================
 # Main Execution
 # ==========================================
 def main():
@@ -561,12 +706,15 @@ def main():
     # 1. Extraction
     fda_data = fetch_fda_data(limit=500)
     dog_data = fetch_dog_breeds()
+    cat_data = fetch_extra_breed_data()
     
     # Save raw data (optional, preserves original notebook logic)
     with open(os.path.join(RAW_DIR, 'fda_adverse_events.json'), 'w') as f:
         json.dump(fda_data, f)
     with open(os.path.join(RAW_DIR, 'dog_breeds.json'), 'w') as f:
         json.dump(dog_data, f)
+    # Cat data is already CSV, no need to dump again unless we want to copy it? 
+    # It exists in RAW_DIR, so we are good.
 
     # 2. Staging & Cleaning
     df_fda = pd.DataFrame(fda_data)
@@ -581,6 +729,7 @@ def main():
     try:
         create_schema(conn)
         populate_time_dimension(conn)
+        load_cat_breeds_to_dim(conn, cat_data)
         load_data_to_warehouse(conn, df_enriched)
         
         # 5. Validation
@@ -589,6 +738,9 @@ def main():
         
         # 6. Text Analytics
         run_text_analytics(conn)
+
+        # 7. Business Reports & Dashboard
+        generate_business_reports_and_dashboard(conn)
         
     finally:
         conn.close()
